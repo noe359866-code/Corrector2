@@ -1,3 +1,4 @@
 # --- solo para desarrollo / CI ---
 pytest>=8.0
 psycopg[binary]>=3.1      # smoke test del SQL contra Postgres real
+pyyaml>=6.0               # validar el workflow en CI (yaml.safe_load)

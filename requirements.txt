@@ -1,3 +1,3 @@
 # --- dependencias de ejecución (el workflow instala esto) ---
-httpx>=0.27,<1.0          # HTTP/2, timeouts y pool de conexiones
+httpx[http2]>=0.27,<1.0   # HTTP/2, timeouts y pool de conexiones
 rapidfuzz>=3.0            # similitud de títulos (mucho más rápida que difflib)
