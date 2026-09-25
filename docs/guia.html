@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Editor de torrents · Guía visual</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; max-width: 860px; margin: 2rem auto;
+         padding: 0 1rem; line-height: 1.55; background: #0d1117; color: #e6edf3; }
+  h1, h2 { color: #79c0ff; }
+  code, pre { background: #161b22; border-radius: 6px; }
+  code { padding: .1em .4em; }
+  pre { padding: 1rem; overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #30363d; padding: .5rem .7rem; text-align: left; }
+  th { background: #161b22; }
+  .ok { color: #3fb950; } .warn { color: #d29922; } .bad { color: #f85149; }
+  footer { margin-top: 3rem; color: #8b949e; font-size: .9em; }
+</style>
+</head>
+<body>
+<h1>🎬 Editor de torrents · Guía visual</h1>
+<p>Pipeline en <strong>GitHub Actions</strong> contra tu tabla
+<code>public.torrents</code> de Supabase: limpieza + IDs
+(TMDB · IMDb · AniList · Kitsu · MAL) + español + reordenador de <code>id</code>.</p>
+
+<h2>Etapas</h2>
+<table>
+<tr><th>#</th><th>Etapa</th><th>Qué hace</th></tr>
+<tr><td>1</td><td><strong>Limpieza basura</strong></td><td>Borra readme / sample / trailer…</td></tr>
+<tr><td>2</td><td><strong>Limpieza xxx</strong></td><td>Borra xxx, OnlyFans, porn… (con allowlist)</td></tr>
+<tr><td>3</td><td><strong>absolute_episode</strong></td><td>Borra episodio solo en <code>absolute_episode</code></td></tr>
+<tr><td>4</td><td><strong>IDs por nombre</strong></td><td>Resuelve tmdb/imdb/anilist/kitsu/mal</td></tr>
+<tr><td>5</td><td><strong>Reintentos NULL</strong></td><td>title_text + variantes + IMDb/TVmaze</td></tr>
+<tr><td>6</td><td><strong>Español + dedupe</strong></td><td>Máx 3, mín 2 en español (audio → subtítulos)</td></tr>
+<tr><td>7</td><td><strong>Reordenador</strong></td><td>Deja <code>id</code> en 1..N sin huecos</td></tr>
+</table>
+
+<h2>Cascada de español</h2>
+<table>
+<tr><th>Peldaño</th><th>Qué cuenta</th><th>Campo</th></tr>
+<tr><td>3</td><td>Audio en español</td><td><code>audio[]</code></td></tr>
+<tr><td>2</td><td>Subtítulos en español</td><td><code>subtitles[]</code></td></tr>
+<tr><td>1</td><td>El título lo dice</td><td><code>title</code></td></tr>
+<tr><td>0</td><td>Nada</td><td>—</td></tr>
+</table>
+
+<h2>Seguridad</h2>
+<ul>
+<li class="ok">✔ <code>sql/007_permisos.sql</code> cierra las funciones a la clave pública.</li>
+<li class="ok">✔ RLS activo + solo lectura pública.</li>
+<li class="warn">⚠ Las filas sin nombre no se borran sin <code>PURGE_EMPTY_TITLE=true</code>.</li>
+<li class="bad">🚨 Corre primero con <code>dry_run=true</code> y revisa el reporte.</li>
+</ul>
+
+<h2>Local</h2>
+<pre>pip install -r requirements.txt -r requirements-dev.txt
+cp config.example.env .env   # edítalo
+python -m src.main selftest
+python -m src.main doctor
+python -m src.main purge --dry-run
+python -m src.main all</pre>
+
+<footer>Editor de torrents v1.6 · <code>sql/000..007</code> · <code>src/main.py</code> ·
+<code>tests/</code> · <code>scripts/</code></footer>
+</body>
+</html>
