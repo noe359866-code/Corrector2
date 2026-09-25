@@ -111,6 +111,10 @@ on:
         description: "TOPE TOTAL de filas a borrar en esta corrida (0 = sin tope)"
         type: string
         default: "0"
+      purge_chunk_rows:
+        description: "Filas por tanda de limpieza (0 = tabla entera de una vez; no recomendado)"
+        type: string
+        default: "20000"
       renumber_ids:
         description: "Reordenar la columna id a 1..N al terminar (rellena huecos)"
         type: boolean
@@ -158,6 +162,9 @@ env:
   # una fila sin nombre (title y title_text vacíos) NO se borra salvo que lo pidas
   PURGE_EMPTY_TITLE: ${{ github.event.inputs.purge_empty || 'false' }}
   PURGE_DEAD: "false"
+  # la limpieza va por tandas de ids: la API de Supabase mata los statements
+  # de más de ~8 s (error 57014) y la purga adulta se pasaba de largo
+  PURGE_CHUNK_ROWS: ${{ github.event.inputs.purge_chunk_rows || '20000' }}
 
   # --- reintento de IDs que quedaron NULL ---
   RETRY_MISSING: "true"

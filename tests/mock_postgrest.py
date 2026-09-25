@@ -22,6 +22,11 @@ from psycopg.types.json import Json
 DSN = os.environ.get("MOCK_DB_URL", "")
 PORT = int(os.environ.get("MOCK_PORT", "8899"))
 HOST = os.environ.get("MOCK_HOST", "127.0.0.1")
+# MOCK_FAIL_RANGE_GT=N -> las purgas que pidan un rango de más de N filas
+# devuelven el 57014 de Supabase (para probar que el pipeline sobrevive).
+# MOCK_FAIL_ALL=1 -> todas las purgas dan 57014.
+FAIL_RANGE_GT = int(os.environ.get("MOCK_FAIL_RANGE_GT", "0") or 0)
+FAIL_ALL = os.environ.get("MOCK_FAIL_ALL") == "1"
 
 if not DSN:
     print("ERROR: falta MOCK_DB_URL")
@@ -88,10 +93,18 @@ class H(BaseHTTPRequestHandler):
         if select != "*":
             cols = ", ".join(f'"{c.strip()}"' for c in select.split(",")
                              if c.strip()) or "*"
+        # PostgREST: order=col | order=col.desc | order=col.asc
+        order = qs.get("order", ["id"])[0]
+        if order.endswith(".desc"):
+            ocol, odir = order[:-5], "desc"
+        elif order.endswith(".asc"):
+            ocol, odir = order[:-4], "asc"
+        else:
+            ocol, odir = order, "asc"
         sql = f"select {cols} from public.torrents"
         if where:
             sql += " where " + " and ".join(where)
-        sql += " order by id limit %s"
+        sql += f' order by "{ocol}" {odir} limit %s'
         params.append(limit)
         try:
             with pg() as c:
@@ -113,6 +126,14 @@ class H(BaseHTTPRequestHandler):
             body = {}
         if not isinstance(body, dict):
             return self._send(400, {"message": "body must be a JSON object"})
+        if (fn.startswith("purge") and body.get("p_min_id") is not None
+                and (FAIL_ALL
+                     or (FAIL_RANGE_GT
+                         and int(body["p_max_id"]) - int(body["p_min_id"]) + 1
+                         > FAIL_RANGE_GT))):
+            return self._send(500, {
+                "code": "57014", "details": None, "hint": None,
+                "message": "canceling statement due to statement timeout"})
         try:
             with pg() as c:
                 f = c.execute(

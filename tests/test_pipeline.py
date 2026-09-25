@@ -8,9 +8,12 @@ import pytest
 
 from src import blacklist, matching
 from src.cache import LocalCache
-from src.config import load
+from src.config import Settings, load
 from src.enrich import sanitize_ids
+from src.db import DbError
+from src.main import Budget
 from src.providers import anilist, imdb, kitsu, tvmaze, tmdb
+from src.purge import _por_tandas, etapas_incompletas, run_purge
 from src.report import Report
 from src.textnorm import normalize, title_key, token_ok
 from src.titleparse import (looks_like_release_name, parse_release,
@@ -334,3 +337,299 @@ class TestWorkflow:
                     "allow_subs_fallback", "purge_empty"):
             assert req in inputs, req
         assert "renumber" in inputs["modo"]["options"]
+
+
+# ------------------------------------------------- limpieza por tandas ---
+class DbRango:
+    """Base de mentira: solo sabe el rango de ids que tiene la tabla."""
+
+    def __init__(self, lo=1, hi=100):
+        self.lo, self.hi = lo, hi
+
+    def id_bounds(self):
+        return (self.lo, self.hi)
+
+
+class DbPurge(DbRango):
+    """Base de mentira con las 4 RPCs de limpieza."""
+
+    def __init__(self, lo=1, hi=5):
+        super().__init__(lo, hi)
+        self.vistas = []
+
+    def purge_junk(self, dry_run, limit, purge_empty,
+                   min_id=None, max_id=None):
+        self.vistas.append(("junk", min_id, max_id, limit))
+        return {"matched": 2, "deleted": 1, "skipped_limit": 0, "sample": []}
+
+    def purge_blocked(self, dry_run, limit, tokens=None, soft_tokens=None,
+                      allow=None, min_id=None, max_id=None):
+        self.vistas.append(("blocked", min_id, max_id, limit, tokens))
+        return {"matched": 3, "deleted": 2, "skipped_limit": 0, "sample": []}
+
+    def purge_absolute(self, action, require_season_null, dry_run, limit,
+                       min_id=None, max_id=None):
+        self.vistas.append(("absolute", min_id, max_id, limit))
+        return {"matched": 1, "deleted": 0, "updated": 1, "skipped_limit": 0,
+                "sample": []}
+
+    def purge_dead(self, min_seeders, older_days, dry_run, limit,
+                   min_id=None, max_id=None):
+        self.vistas.append(("dead", min_id, max_id, limit))
+        return {"matched": 4, "deleted": 4, "skipped_limit": 0, "sample": []}
+
+
+def _cfg(**kw):
+    base = dict(purge_junk=False, purge_blocked=False, purge_absolute_only=False,
+                purge_dead=False, purge_soft_adult=False,
+                purge_empty_title=False, purge_chunk_rows=10,
+                purge_chunk_min=2, absolute_only_action="delete")
+    base.update(kw)
+    return Settings(**base)
+
+
+class TestPurgePorTandas:
+    def _ok(self, matched=3, deleted=1):
+        return {"matched": matched, "deleted": deleted, "skipped_limit": 0,
+                "sample": []}
+
+    def test_tandas_cubren_toda_la_tabla(self):
+        vistas = []
+
+        def llamada(a, b, limite):
+            vistas.append((a, b))
+            return self._ok()
+
+        out = _por_tandas(DbRango(1, 25), llamada, Budget(0), True, 10, 2,
+                          "basura", "candidatas", "borradas")
+        assert vistas == [(1, 10), (11, 20), (21, 25)]
+        assert out["matched"] == 9 and out["deleted"] == 3
+        assert out["tandas"] == 3 and out["errores"] == 0
+        assert out["nota"].startswith("basura: 9 candidatas, 3 borradas")
+
+    def test_timeout_encoge_la_tanda_y_reintenta(self):
+        buenas = []
+        intentos = []
+
+        def llamada(a, b, limite):
+            intentos.append(b - a + 1)
+            if b - a + 1 > 4:
+                raise DbError("RPC 'purge_blocked_torrents' HTTP 500: "
+                              '{"code":"57014","message":"canceling '
+                              'statement due to statement timeout"}')
+            buenas.append((a, b))
+            return self._ok()
+
+        out = _por_tandas(DbRango(1, 20), llamada, Budget(0), True, 10, 2,
+                          "bloqueados", "candidatos")
+        assert out["errores"] == 0, out
+        assert out["deleted"] == 10
+        # probó 10, encogió a 5, y a partir de ahí fue de 2 en 2
+        assert intentos[0] == 10 and intentos[1] == 5
+        assert all(t <= 4 for t in intentos[2:])
+        assert [b for _a, b in buenas] == [2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
+
+    def test_tanda_irrecuperable_se_anota_y_se_sigue(self):
+        def llamada(a, b, limite):
+            if a == 5:
+                raise DbError("HTTP 500 57014 cancelling statement due to "
+                              "statement timeout")
+            return self._ok()
+
+        out = _por_tandas(DbRango(1, 10), llamada, Budget(0), True, 4, 2,
+                          "basura", "candidatas")
+        assert out["errores"] == 1
+        assert out["pendientes"][0][0] == 5
+        assert out["deleted"] == 3          # (1-4), (7-8) y (9-10)
+        assert "OJO" in out["nota"]
+        assert etapas_incompletas({"basura": out}) == ["basura"]
+
+    def test_error_de_red_se_reintenta_una_vez(self, monkeypatch):
+        monkeypatch.setattr("src.purge.time.sleep", lambda _s: None)
+        n = {"v": 0}
+
+        def llamada(a, b, limite):
+            n["v"] += 1
+            if n["v"] == 1:
+                raise DbError("RPC 'x': sin conexión (Connection error)")
+            return self._ok()
+
+        out = _por_tandas(DbRango(1, 10), llamada, Budget(0), True, 10, 2,
+                          "basura", "candidatas")
+        assert n["v"] == 2 and out["errores"] == 0 and out["deleted"] == 1
+
+    def test_presupuesto_agotado_para_el_recorrido(self):
+        def llamada(a, b, limite):
+            return self._ok()
+
+        presupuesto = Budget(3)
+        out = _por_tandas(DbRango(1, 100), llamada, presupuesto, True, 10, 2,
+                          "basura", "candidatas")
+        assert presupuesto.used == 3 and out["tandas"] == 3
+        assert out["parado_por_presupuesto"] is True
+        assert "parcial" in out["nota"]
+
+    def test_tabla_vacia_no_llama_a_la_rpc(self):
+        def llamada(a, b, limite):
+            raise AssertionError("no debería llamarse")
+
+        out = _por_tandas(DbRango(1, 0), llamada, Budget(0), True, 10, 2,
+                          "basura", "candidatas")
+        assert out["matched"] == 0 and "vacía" in out["nota"]
+
+    def test_sin_tandas_una_sola_llamada(self):
+        vistas = []
+
+        def llamada(a, b, limite):
+            vistas.append((a, b, limite))
+            return self._ok(5, 5)
+
+        out = _por_tandas(DbRango(1, 1000), llamada, Budget(0), True, 0, 2,
+                          "basura", "candidatas")
+        assert vistas == [(None, None, 0)] and out["tandas"] == 1
+        assert out["deleted"] == 5
+
+
+class TestRunPurge:
+    def test_tandas_y_acumulado(self):
+        db = DbPurge(1, 25)
+        out = run_purge(db, _cfg(purge_junk=True, purge_blocked=True,
+                                 purge_absolute_only=True, purge_dead=True),
+                        Budget(0), False)
+        assert out["junk"]["deleted"] == 3        # 3 tandas x 1
+        assert out["blocked"]["deleted"] == 6     # 3 tandas x 2
+        assert etapas_incompletas(out) == []
+        rangos = [v[1:3] for v in db.vistas if v[0] == "blocked"]
+        assert rangos == [(1, 10), (11, 20), (21, 25)]
+
+    def test_desactivadas_se_saltan(self):
+        db = DbPurge(1, 5)
+        out = run_purge(db, _cfg(purge_junk=True), Budget(0), True)
+        assert out["junk"]["tandas"] == 1
+        for etapa in ("blocked", "absolute", "dead"):
+            assert out[etapa]["skipped"] is True
+            assert "desactivada" in out[etapa]["nota"]
+
+    def test_etapa_rota_no_tumba_las_demas(self):
+        class DbRota(DbPurge):
+            def purge_blocked(self, dry_run, limit, tokens=None,
+                              soft_tokens=None, allow=None,
+                              min_id=None, max_id=None):
+                if min_id == 1:                  # solo la primera tanda
+                    raise DbError("RPC 'purge_blocked_torrents' HTTP 500: "
+                                  "57014 canceling statement due to "
+                                  "statement timeout")
+                return super().purge_blocked(dry_run, limit, tokens,
+                                             soft_tokens, allow, min_id,
+                                             max_id)
+
+        db = DbRota(1, 30)
+        out = run_purge(db, _cfg(purge_junk=True, purge_blocked=True),
+                        Budget(0), True)
+        assert out["blocked"]["errores"] == 1
+        assert out["junk"]["deleted"] == 3        # junk sí corrió entera
+        assert etapas_incompletas(out) == ["blocked"]
+        assert "OJO" in out["blocked"]["nota"]
+
+    def test_etapa_rota_en_todas_las_tandas_las_anota(self):
+        class DbRota(DbPurge):
+            def purge_blocked(self, *a, **k):
+                raise DbError("HTTP 500 57014 statement timeout")
+
+        out = run_purge(DbRota(1, 30), _cfg(purge_blocked=True,
+                                            purge_chunk_rows=10,
+                                            purge_chunk_min=10),
+                        Budget(0), True)
+        # una tanda de 10 sobre 1..30 = 3 tandas, las 3 apuntadas
+        assert out["blocked"]["errores"] == 3
+        assert len(out["blocked"]["pendientes"]) == 3
+        assert out["blocked"]["matched"] == 0
+        assert etapas_incompletas(out) == ["blocked"]
+
+    def test_no_queda_sin_revisar_si_todo_va_bien(self):
+        out = run_purge(DbPurge(1, 25), _cfg(purge_junk=True,
+                                             purge_blocked=True), Budget(0), True)
+        assert etapas_incompletas(out) == []
+
+
+class TestDbLimpieza:
+    """El driver manda p_min_id/p_max_id (y id_bounds se lee con orden)."""
+
+    def _db_con_mock(self, handler):
+        import httpx
+        from src.db import DB
+        db = DB("http://test.local", "clave")
+        db.c = httpx.Client(transport=httpx.MockTransport(handler),
+                            base_url="http://test.local")
+        return db
+
+    def test_id_bounds(self):
+        import httpx
+
+        def handler(request):
+            orden = request.url.params.get("order")
+            return httpx.Response(200, json=[{"id": 7 if orden == "id" else 999}])
+
+        db = self._db_con_mock(handler)
+        assert db.id_bounds() == (7, 999)
+
+    def test_id_bounds_tabla_vacia(self):
+        import httpx
+        db = self._db_con_mock(lambda r: httpx.Response(200, json=[]))
+        assert db.id_bounds() == (0, -1)
+
+    def test_purge_manda_el_rango(self):
+        import json
+
+        import httpx
+        cuerpos = []
+
+        def handler(request):
+            cuerpos.append(json.loads(request.read() or b"{}"))
+            return httpx.Response(200, json=[{"matched": 1, "deleted": 1}])
+
+        db = self._db_con_mock(handler)
+        db.purge_blocked(False, 5, ["xxx"], ["nude"], ["pack"], 100, 199)
+        assert cuerpos[-1] == {"p_tokens": ["xxx"], "p_soft_tokens": ["nude"],
+                               "p_allow": ["pack"], "p_dry_run": False,
+                               "p_limit": 5, "p_min_id": 100,
+                               "p_max_id": 199}
+        db.purge_junk(False, 0, True, 100, 199)
+        assert cuerpos[-1]["p_min_id"] == 100 and cuerpos[-1]["p_max_id"] == 199
+        db.purge_absolute("delete", True, False, 0, 1, 9)
+        assert cuerpos[-1]["p_min_id"] == 1 and cuerpos[-1]["p_max_id"] == 9
+        db.purge_dead(1, 60, False, 0, 1, 9)
+        assert cuerpos[-1]["p_min_id"] == 1 and cuerpos[-1]["p_max_id"] == 9
+
+    def test_purge_sin_rango_manda_null(self):
+        import json
+
+        import httpx
+        cuerpos = []
+
+        def handler(request):
+            cuerpos.append(json.loads(request.read() or b"{}"))
+            return httpx.Response(200, json=[{"matched": 0, "deleted": 0}])
+
+        db = self._db_con_mock(handler)
+        db.purge_junk(True, 0, False)
+        assert cuerpos[-1]["p_min_id"] is None
+        assert cuerpos[-1]["p_max_id"] is None
+
+
+class TestConfigChunk:
+    def test_por_defecto(self):
+        c = load()
+        assert c.purge_chunk_rows == 20000
+        assert c.purge_chunk_min == 1000
+
+    def test_desde_entorno(self, monkeypatch):
+        monkeypatch.setenv("PURGE_CHUNK_ROWS", "5000")
+        monkeypatch.setenv("PURGE_CHUNK_MIN", "500")
+        c = load()
+        assert c.purge_chunk_rows == 5000
+        assert c.purge_chunk_min == 500
+
+    def test_cero_apaga_las_tandas(self, monkeypatch):
+        monkeypatch.setenv("PURGE_CHUNK_ROWS", "0")
+        assert load().purge_chunk_rows == 0

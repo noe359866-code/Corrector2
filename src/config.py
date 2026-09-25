@@ -68,6 +68,10 @@ class Settings:
     absolute_require_season_null: bool = True
     dead_min_seeders: int = 1
     dead_older_days: int = 60
+    # tandas de ids por etapa: la API de Supabase mata los statements de más
+    # de ~8 s (error 57014). 0 = una sola llamada a tabla completa.
+    purge_chunk_rows: int = 20000
+    purge_chunk_min: int = 1000       # suelo al encoger la tanda por timeout
 
     # --- mejores (regla simple) ---
     keep_best: bool = False
@@ -137,6 +141,8 @@ def load() -> Settings:
         absolute_require_season_null=_bool("ABSOLUTE_REQUIRE_SEASON_NULL", True),
         dead_min_seeders=_int("DEAD_MIN_SEEDERS", 1),
         dead_older_days=_int("DEAD_OLDER_DAYS", 60),
+        purge_chunk_rows=_int("PURGE_CHUNK_ROWS", 20000),
+        purge_chunk_min=_int("PURGE_CHUNK_MIN", 1000),
         keep_best=_bool("KEEP_BEST", False),
         keep_best_limit=_int("KEEP_BEST_LIMIT", 3),
         keep_best_min_seeders=_int("KEEP_BEST_MIN_SEEDERS", 0),

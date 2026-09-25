@@ -115,34 +115,76 @@ class DB:
         return data if isinstance(data, list) else []
 
     # -- limpieza ---------------------------------------------------------
+    def id_bounds(self) -> tuple[int, int]:
+        """(id mínimo, id máximo) de public.torrents.
+
+        La purga trabaja por tandas de ids; necesita saber por dónde empezar
+        y terminar. Devuelve (0, -1) si la tabla está vacía (una tanda vacía
+        no rompe nada, pero así nos ahorramos la llamada).
+        """
+        lo = self._edge_id("id")
+        if lo is None:
+            return (0, -1)
+        hi = self._edge_id("id.desc")
+        return (lo, hi if hi is not None else lo)
+
+    def _edge_id(self, order: str) -> int | None:
+        try:
+            r = self.c.get("/rest/v1/torrents",
+                           params={"select": "id", "order": order, "limit": 1})
+        except httpx.HTTPError as e:
+            raise DbError(f"GET torrents (order={order}): sin conexión ({e}).")
+        if r.status_code >= 400:
+            raise DbError(f"GET torrents HTTP {r.status_code}: "
+                          f"{(r.text or '')[:200]}")
+        try:
+            data = r.json()
+        except ValueError:
+            return None
+        if isinstance(data, list) and data and data[0].get("id") is not None:
+            return int(data[0]["id"])
+        return None
+
     def purge_junk(self, dry_run: bool, limit: int,
-                   purge_empty: bool) -> dict:
+                   purge_empty: bool,
+                   min_id: int | None = None,
+                   max_id: int | None = None) -> dict:
         return self.rpc_row("purge_junk_torrents",
                             {"p_dry_run": dry_run, "p_limit": limit,
-                             "p_purge_empty": purge_empty})
+                             "p_purge_empty": purge_empty,
+                             "p_min_id": min_id, "p_max_id": max_id})
 
     def purge_blocked(self, dry_run: bool, limit: int,
                       tokens: list | None = None,
                       soft_tokens: list | None = None,
-                      allow: list | None = None) -> dict:
+                      allow: list | None = None,
+                      min_id: int | None = None,
+                      max_id: int | None = None) -> dict:
         return self.rpc_row("purge_blocked_torrents",
                             {"p_tokens": tokens, "p_soft_tokens": soft_tokens,
                              "p_allow": allow, "p_dry_run": dry_run,
-                             "p_limit": limit})
+                             "p_limit": limit,
+                             "p_min_id": min_id, "p_max_id": max_id})
 
     def purge_absolute(self, action: str, require_season_null: bool,
-                       dry_run: bool, limit: int) -> dict:
+                       dry_run: bool, limit: int,
+                       min_id: int | None = None,
+                       max_id: int | None = None) -> dict:
         return self.rpc_row("purge_absolute_only_torrents",
                             {"p_action": action,
                              "p_require_season_null": require_season_null,
-                             "p_dry_run": dry_run, "p_limit": limit})
+                             "p_dry_run": dry_run, "p_limit": limit,
+                             "p_min_id": min_id, "p_max_id": max_id})
 
     def purge_dead(self, min_seeders: int, older_days: int,
-                   dry_run: bool, limit: int) -> dict:
+                   dry_run: bool, limit: int,
+                   min_id: int | None = None,
+                   max_id: int | None = None) -> dict:
         return self.rpc_row("purge_dead_torrents",
                             {"p_min_seeders": min_seeders,
                              "p_older_days": older_days,
-                             "p_dry_run": dry_run, "p_limit": limit})
+                             "p_dry_run": dry_run, "p_limit": limit,
+                             "p_min_id": min_id, "p_max_id": max_id})
 
     def keep_best(self, limit: int, min_seeders: int, only_types: str,
                   dry_run: bool, max_deletes: int) -> dict:

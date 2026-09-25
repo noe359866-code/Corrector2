@@ -58,7 +58,7 @@ El workflow tiene **3 jobs**:
 
 1. **Pruebas** — `pytest` (65) + `selftest` + valida el YAML y los scripts + levanta un
    **Postgres 16 real** en el runner, aplica `sql/*.sql` **dos veces** (idempotencia) y corre el
-   smoke test SQL (122 comprobaciones) + `live_providers` (informativo).
+   smoke test SQL (63 comprobaciones) + `live_providers` (informativo).
 2. **Migraciones** — si existe el secret `SUPABASE_DB_URL`, aplica los 5 archivos SQL y verifica
    que las 20 funciones existen. Si falta, avisa y sigue.
 3. **Pipeline** — `doctor` → **limpieza** → **IDs** → **reintentos** → **español/deduplicado**,
@@ -125,6 +125,10 @@ python -m src.main all                # purge -> enrich -> retry -> best (lo que
 python -m src.main purge --max-deletes 500
 MAX_DELETES_PER_RUN=500 python -m src.main all
 
+# la limpieza va por tandas de ids (para no pasarse del timeout de la base)
+python -m src.main purge --chunk-rows 5000      # tandas de 5.000 filas
+PURGE_CHUNK_ROWS=20000 python -m src.main purge  # lo mismo por variable de entorno
+
 # el reordenador de la columna id (deja 1..N sin huecos)
 python -m src.main renumber                 # respeta RENUMBER_IDS
 python -m src.main renumber --dry-run       # dice a dónde iría sin tocar nada
@@ -132,22 +136,24 @@ RENUMBER_IDS=true RENUMBER_IDS_FORCE=true python -m src.main renumber
 ```
 
 Otros comandos: `enrich`, `retry`, `best`, `renumber`, `purge`, `stats`, `doctor`, `selftest`.
-Flags útiles: `--dry-run`, `--limit 100`, `--rounds 3`, `--max-deletes 500`, `--renumber`, `-v`.
+Flags útiles: `--dry-run`, `--limit 100`, `--rounds 3`, `--max-deletes 500`, `--chunk-rows 20000`,
+`--renumber`, `-v`.
 
 ### Pruebas
 
 ```bash
-python -m pytest tests -q            # 65 pruebas: parser, blacklist, matching, pipeline, fallback,
-                                     # title_text, tope por corrida, ids saneados y reordenador
+python -m pytest tests -q            # 67 pruebas: parser, blacklist, matching, pipeline, fallback,
+                                     # title_text, tope por corrida, ids saneados, reordenador
+                                     # y la limpieza por tandas (timeout, presupuesto, pendientes)
 python tests/live_providers.py       # consulta REAL a AniList/Kitsu/Jikan (necesita red)
-TEST_DB_URL=postgresql://... python tests/sql_smoke.py   # 122 pruebas del SQL contra Postgres
+TEST_DB_URL=postgresql://... python tests/sql_smoke.py   # 63 pruebas del SQL contra Postgres
                                                          # (purgas, keep_best, cascada de español, reintentos,
                                                          #  tope por corrida y reordenador de ids)
 
 bash scripts/test_all.sh --docker    # todo de una (levanta Postgres 16 en Docker)
 ```
 
-Todas en verde hoy: **65 passed**, **122 OK / 0 fallos**, `live_providers` OK.
+Todas en verde hoy: **67 passed**, **63 OK / 0 fallos**, `live_providers` OK.
 
 ### Probar TODO el pipeline sin Supabase (PostgREST simulado)
 
@@ -320,6 +326,32 @@ Se evalúa `title + release_group + source_tracker` con **dos reglas** (`src/bla
 - Listas propias: `BLOCKED_TOKENS_EXTRA`, `ALLOW_TOKENS_EXTRA` (separadas por coma).
 
 La misma lógica existe en SQL (`public.norm_torrent_text` + `purge_blocked_torrents`) para que el borrado ocurra en la base.
+
+**Va por tandas, no de golpe.** La purga recorre la tabla en rangos cortos de `id`
+(`PURGE_CHUNK_ROWS`, 20.000 por defecto). Motivo: la API REST de Supabase mata cualquier
+*statement* que pase de ~8 s con
+
+```
+❌ RPC 'purge_blocked_torrents' HTTP 500: {"code":"57014","message":"canceling statement
+due to statement timeout"}
+```
+
+y antes eso mataba la corrida entera (exit 2) sin llegar a las etapas siguientes. Ahora cada
+tanda usa el índice de la primary key (`Index Cond: id >= X AND id <= Y`) y cabe de sobra;
+además el SQL se optimizó (cada fila se normaliza 3 veces en vez de ~4 por token, y los ~50
+tokens se compilan en una sola regex): **la misma purga es ~40x más rápida** (25 s → 0,6 s
+cada 20.000 filas) y borra **exactamente** lo mismo.
+
+Si una tanda se pasa del timeout, se **encoge sola** (a la mitad, hasta `PURGE_CHUNK_MIN`) y
+se reintenta. Si ni así cabe, se apunta el rango en `pendientes`, se sigue con la siguiente y
+al final el run **avisa y sale con exit 2** en vez de decir "OK" cuando faltó trabajo:
+
+```
+⚠️ limpieza INCOMPLETA en: blocked (tandas que se pasaron del timeout de la base).
+    Repetir `python -m src.main purge` remata lo que falta.
+```
+
+Repetir la corrida es barato: lo ya borrado no se vuelve a mirar.
 
 ### 4.2 `absolute_episode`
 
@@ -500,6 +532,7 @@ Todas se configuran en `config.example.env` o como *Secrets/Variables* del repo.
 | `REPORT_TO_STEP_SUMMARY` | true | `false` = no volcar cada paso al Step Summary (el workflow los une al final) |
 | `BLOCKED_TOKENS_EXTRA`, `ALLOW_TOKENS_EXTRA` | — | listas propias |
 | `DEAD_MIN_SEEDERS`, `DEAD_OLDER_DAYS` | 1, 60 | para `PURGE_DEAD` |
+| `PURGE_CHUNK_ROWS`, `PURGE_CHUNK_MIN` | 20000, 1000 | filas por tanda de limpieza (y suelo al encoger por timeout). `0` = tabla entera de una vez |
 
 ---
 
@@ -556,6 +589,12 @@ Todas se configuran en `config.example.env` o como *Secrets/Variables* del repo.
   (o deja `RENUMBER_IDS=true`, que el workflow ya lo hace como paso 5/6).
 * **«No quiero que borre todo de golpe»**: `MAX_DELETES_PER_RUN=500` (tope **total** de filas
   borradas en la corrida; lo que sobre queda para la siguiente) y repite corridas.
+* **`57014` / «canceling statement due to statement timeout» en la limpieza**: la base mató
+  el statement por pasarse del timeout de la API (~8 s). Desde la versión con tandas ya no
+  debería pasar (baja `PURGE_CHUNK_ROWS` si tu base es lenta). Si aun así aparece, el reporte
+  dice **qué rangos de id** quedaron sin revisar: repite `python -m src.main purge` y los
+  remata. Para una purga puntual enorme también puedes correrla desde el SQL Editor con más
+  tiempo: `set statement_timeout='10min'; select * from public.purge_blocked_torrents(p_dry_run=>false);`
 * **«Apliqué el SQL y sigue fallando»**: aplica `scripts/apply_sql.sh` **completo**. Si aplicas
   `sql/004` *después* de `sql/005`, la función `keep_best_torrents_es` queda con dos firmas
   (Postgres no la reemplaza porque cambió `p_max_deletes`) y las llamadas se vuelven ambiguas.

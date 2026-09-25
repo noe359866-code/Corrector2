@@ -18,7 +18,7 @@ from .db import DB, DbError, RpcMissing
 from .enrich import Ctx, EXPECTED, new_stats, process_batch, sanitize_ids
 from .http_client import Http
 from .providers import anilist, imdb
-from .purge import run_purge
+from .purge import etapas_incompletas, run_purge
 from .report import Report
 from .textnorm import normalize
 from .titleparse import looks_like_release_name, parse_release
@@ -313,6 +313,18 @@ def do_purge(db: DB, cfg: Settings, rep: Report, budget: Budget,
                          r.get("skipped_limit"), r.get("nota", "")])
     rep.table("Etapas", ["Etapa", "Candidatas", "Borradas",
                          "Fuera por tope", "Nota"], rows)
+    # una etapa con tandas fallidas NO tumba las demás, pero hay que decirlo
+    mal = etapas_incompletas(out)
+    if mal:
+        aviso = ("⚠️ limpieza INCOMPLETA en: " + ", ".join(mal)
+                 + " (tandas que se pasaron del timeout de la base). "
+                   "Repetir `python -m src.main purge` remata lo que falta.")
+        print(aviso, flush=True)
+        rep.text(aviso)
+        for stage in mal:
+            for rango in (out[stage].get("pendientes") or [])[:10]:
+                rep.text(f"  · {stage}: sin revisar ids {rango[0]}-{rango[1]}"
+                         f" → {rango[2]}")
     data = {"stats_antes": before, "stats_despues": after,
             "purge": out, "fuera_por_tope": fuera}
     rep.update(data)
@@ -540,12 +552,13 @@ def cmd_purge(cfg: Settings, args) -> int:
     try:
         budget = Budget(args.max_deletes if args.max_deletes is not None
                         else cfg.max_deletes_per_run)
-        do_purge(db, cfg, rep, budget, args.dry_run or cfg.dry_run)
+        data = do_purge(db, cfg, rep, budget, args.dry_run or cfg.dry_run)
         rep.set("presupuesto", {"tope": budget.cap, "usado": budget.used,
                                 "restante": budget.remaining})
         rep.write(cfg.summary_file, cfg.summary_json,
                   cfg.report_to_step_summary)
-        return 0
+        # 2 = algo quedó sin revisar (la corrida no está terminada)
+        return 2 if etapas_incompletas(data.get("purge")) else 0
     except (DbError, RpcMissing) as e:
         _rpc_error_note(rep, cfg, e)
         return 2
@@ -654,7 +667,8 @@ def cmd_all(cfg: Settings, args) -> int:
         dry = args.dry_run or cfg.dry_run
         budget = Budget(args.max_deletes if args.max_deletes is not None
                         else cfg.max_deletes_per_run)
-        do_purge(db, cfg, rep, budget, dry)
+        purge_out = do_purge(db, cfg, rep, budget, dry).get("purge") or {}
+        incompleto = etapas_incompletas(purge_out)
         if budget.exhausted:
             rep.text("⏭️ presupuesto agotado: se omiten enrich/retry/best.")
         else:
@@ -683,6 +697,10 @@ def cmd_all(cfg: Settings, args) -> int:
                   cfg.report_to_step_summary)
         print(f"✔ ALL OK en {time.time() - t0:.1f}s "
               f"(borradas: {budget.used})", flush=True)
+        if incompleto:
+            print(f"⚠️ ojo: la limpieza quedó incompleta "
+                  f"({', '.join(incompleto)}); repetir purge", flush=True)
+            return 2
         return 0
     except (DbError, RpcMissing) as e:
         _rpc_error_note(rep, cfg, e)
@@ -707,6 +725,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="rondas (0 = las de la config)")
     p.add_argument("--max-deletes", type=int, default=None,
                    help="tope de borrado de esta corrida (0 = sin tope)")
+    p.add_argument("--chunk-rows", type=int, default=None,
+                   help="filas por tanda en la limpieza "
+                        "(0 = tabla entera de una vez)")
     p.add_argument("--renumber", action="store_true",
                    help="fuerza el reordenador de id")
     p.add_argument("-v", "--verbose", action="store_true")
@@ -717,6 +738,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     cfg = load()
+    if args.chunk_rows is not None:
+        cfg.purge_chunk_rows = max(0, args.chunk_rows)
+        if cfg.purge_chunk_rows == 0 and args.mode in ("all", "purge"):
+            print("⚠️ --chunk-rows 0: la limpieza irá a tabla entera "
+                  "(se puede pasar del timeout de la base)", flush=True)
     if args.quiet:
         setup_logging("WARNING")
     elif args.verbose:
