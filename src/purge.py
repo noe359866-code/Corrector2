@@ -23,7 +23,7 @@ import logging
 import time
 
 from .blacklist import ALLOW, BLOCKED_CORE, SOFT_ADULT
-from .db import DbError
+from .db import DbError, RpcMissing
 
 log = logging.getLogger("purge")
 
@@ -91,7 +91,8 @@ def _por_tandas(db, llamada, budget, dry_run: bool, chunk_rows: int,
         total["nota"] = f"{etiqueta}: 0 {singular}, 0 {borrado} (tabla vacía)"
         return total
 
-    if int(chunk_rows or 0) <= 0:     # tandas apagadas: una sola pasada
+    def pasada_unica():
+        """Una sola llamada a tabla completa (tandas apagadas o SQL viejo)."""
         try:
             r = llamada(None, None, budget.remaining)
         except DbError as e:
@@ -104,8 +105,11 @@ def _por_tandas(db, llamada, budget, dry_run: bool, chunk_rows: int,
         total["tandas"] = 1
         budget.consume(int(r.get("deleted", 0) or 0))
         total["nota"] = _nota(etiqueta, total, singular, borrado,
-                               con_limpiados)
+                              con_limpiados)
         return total
+
+    if int(chunk_rows or 0) <= 0:     # tandas apagadas: una sola pasada
+        return pasada_unica()
 
     size = max(1, int(chunk_rows))
     chunk_min = max(1, int(chunk_min or 1))
@@ -117,6 +121,14 @@ def _por_tandas(db, llamada, budget, dry_run: bool, chunk_rows: int,
         top = min(cursor + size - 1, hi)
         try:
             r = llamada(cursor, top, budget.remaining)
+        except RpcMissing:
+            # La base todavía tiene el SQL viejo (sin p_min_id/p_max_id).
+            # No rompemos: se revisa la tabla entera de una vez, como antes,
+            # y se avisa de que falta aplicar sql/003_purge.sql.
+            log.warning("%s: la base no acepta rangos de id "
+                        "(¿aplicaste sql/003_purge.sql?); se revisa la "
+                        "tabla entera de una vez", etiqueta)
+            return pasada_unica()
         except DbError as e:
             if _es_timeout(e) and size > chunk_min:
                 size = max(chunk_min, size // 2)

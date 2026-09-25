@@ -142,7 +142,7 @@ Flags útiles: `--dry-run`, `--limit 100`, `--rounds 3`, `--max-deletes 500`, `-
 ### Pruebas
 
 ```bash
-python -m pytest tests -q            # 67 pruebas: parser, blacklist, matching, pipeline, fallback,
+python -m pytest tests -q            # 68 pruebas: parser, blacklist, matching, pipeline, fallback,
                                      # title_text, tope por corrida, ids saneados, reordenador
                                      # y la limpieza por tandas (timeout, presupuesto, pendientes)
 python tests/live_providers.py       # consulta REAL a AniList/Kitsu/Jikan (necesita red)
@@ -153,7 +153,7 @@ TEST_DB_URL=postgresql://... python tests/sql_smoke.py   # 63 pruebas del SQL co
 bash scripts/test_all.sh --docker    # todo de una (levanta Postgres 16 en Docker)
 ```
 
-Todas en verde hoy: **67 passed**, **63 OK / 0 fallos**, `live_providers` OK.
+Todas en verde hoy: **68 passed**, **63 OK / 0 fallos**, `live_providers` OK.
 
 ### Probar TODO el pipeline sin Supabase (PostgREST simulado)
 
@@ -352,6 +352,11 @@ al final el run **avisa y sale con exit 2** en vez de decir "OK" cuando faltó t
 ```
 
 Repetir la corrida es barato: lo ya borrado no se vuelve a mirar.
+
+**Si actualizas el código pero todavía no aplicaste el SQL**, no pasa nada: la purga lo
+detecta, avisa (`la base no acepta rangos de id`) y hace la pasada única de siempre. Aplica
+`sql/003_purge.sql` (el job de *migraciones* del workflow lo hace solo si tienes
+`SUPABASE_DB_URL`) y la siguiente corrida ya irá por tandas.
 
 ### 4.2 `absolute_episode`
 

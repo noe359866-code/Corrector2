@@ -148,6 +148,12 @@ class H(BaseHTTPRequestHandler):
                                    " in the schema cache"})
                 names = f["proargnames"] or []
                 types = f["t"].split(", ") if f["t"] else []
+                # PostgREST es ESTRICTO: una clave del body que no es
+                # argumento de la función => no hay función que casque => 404.
+                if set(body) - set(names):
+                    return self._send(404, {
+                        "message": f"Could not find the function public.{fn}"
+                                   f" in the schema cache"})
                 args, params = [], []
                 for i, nm in enumerate(names):
                     if nm in body and body[nm] is not None:

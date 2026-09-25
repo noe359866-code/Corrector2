@@ -10,7 +10,7 @@ from src import blacklist, matching
 from src.cache import LocalCache
 from src.config import Settings, load
 from src.enrich import sanitize_ids
-from src.db import DbError
+from src.db import DbError, RpcMissing
 from src.main import Budget
 from src.providers import anilist, imdb, kitsu, tvmaze, tmdb
 from src.purge import _por_tandas, etapas_incompletas, run_purge
@@ -477,6 +477,23 @@ class TestPurgePorTandas:
                           "basura", "candidatas")
         assert out["matched"] == 0 and "vacía" in out["nota"]
 
+    def test_sql_viejo_cae_a_una_sola_pasada(self):
+        """Código nuevo + base sin p_min_id: no rompe, avisa y sigue."""
+        vistas = []
+
+        def llamada(a, b, limite):
+            vistas.append((a, b))
+            if a is not None:            # la base no conoce p_min_id
+                raise RpcMissing("RPC 'purge_blocked_torrents' HTTP 404: "
+                                 "Could not find the function")
+            return self._ok(9, 9)
+
+        out = _por_tandas(DbRango(1, 5000), llamada, Budget(0), True, 1000, 2,
+                          "bloqueados", "candidatos", "borrados")
+        assert vistas == [(1, 1000), (None, None)]   # 1 intento + pasada única
+        assert out["tandas"] == 1 and out["errores"] == 0
+        assert out["deleted"] == 9
+
     def test_sin_tandas_una_sola_llamada(self):
         vistas = []
 
@@ -601,7 +618,12 @@ class TestDbLimpieza:
         db.purge_dead(1, 60, False, 0, 1, 9)
         assert cuerpos[-1]["p_min_id"] == 1 and cuerpos[-1]["p_max_id"] == 9
 
-    def test_purge_sin_rango_manda_null(self):
+    def test_purge_sin_rango_no_manda_los_args(self):
+        """Sin rango NO se mandan p_min_id/p_max_id.
+
+        Así una base con el SQL viejo (sin esos argumentos) responde en vez
+        de dar 404: el driver degrada a una sola pasada.
+        """
         import json
 
         import httpx
@@ -613,8 +635,13 @@ class TestDbLimpieza:
 
         db = self._db_con_mock(handler)
         db.purge_junk(True, 0, False)
-        assert cuerpos[-1]["p_min_id"] is None
-        assert cuerpos[-1]["p_max_id"] is None
+        db.purge_blocked(True, 0)
+        db.purge_dead(1, 60, True, 0)
+        assert all("p_min_id" not in c and "p_max_id" not in c
+                   for c in cuerpos), cuerpos
+        db.purge_junk(True, 0, False, 5, None)      # solo el mínimo
+        assert cuerpos[-1]["p_min_id"] == 5
+        assert "p_max_id" not in cuerpos[-1]
 
 
 class TestConfigChunk:

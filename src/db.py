@@ -115,6 +115,19 @@ class DB:
         return data if isinstance(data, list) else []
 
     # -- limpieza ---------------------------------------------------------
+    @staticmethod
+    def _rango(params: dict, min_id: int | None, max_id: int | None) -> dict:
+        """Añade p_min_id/p_max_id SOLO si hay rango.
+
+        Mandarlos como null haría que una base con el SQL viejo (funciones sin
+        esos argumentos) responda 404 en vez de degradar a la pasada única.
+        """
+        if min_id is not None:
+            params["p_min_id"] = min_id
+        if max_id is not None:
+            params["p_max_id"] = max_id
+        return params
+
     def id_bounds(self) -> tuple[int, int]:
         """(id mínimo, id máximo) de public.torrents.
 
@@ -150,9 +163,10 @@ class DB:
                    min_id: int | None = None,
                    max_id: int | None = None) -> dict:
         return self.rpc_row("purge_junk_torrents",
-                            {"p_dry_run": dry_run, "p_limit": limit,
-                             "p_purge_empty": purge_empty,
-                             "p_min_id": min_id, "p_max_id": max_id})
+                            self._rango({"p_dry_run": dry_run,
+                                         "p_limit": limit,
+                                         "p_purge_empty": purge_empty},
+                                        min_id, max_id))
 
     def purge_blocked(self, dry_run: bool, limit: int,
                       tokens: list | None = None,
@@ -161,30 +175,35 @@ class DB:
                       min_id: int | None = None,
                       max_id: int | None = None) -> dict:
         return self.rpc_row("purge_blocked_torrents",
-                            {"p_tokens": tokens, "p_soft_tokens": soft_tokens,
-                             "p_allow": allow, "p_dry_run": dry_run,
-                             "p_limit": limit,
-                             "p_min_id": min_id, "p_max_id": max_id})
+                            self._rango({"p_tokens": tokens,
+                                         "p_soft_tokens": soft_tokens,
+                                         "p_allow": allow,
+                                         "p_dry_run": dry_run,
+                                         "p_limit": limit},
+                                        min_id, max_id))
 
     def purge_absolute(self, action: str, require_season_null: bool,
                        dry_run: bool, limit: int,
                        min_id: int | None = None,
                        max_id: int | None = None) -> dict:
         return self.rpc_row("purge_absolute_only_torrents",
-                            {"p_action": action,
-                             "p_require_season_null": require_season_null,
-                             "p_dry_run": dry_run, "p_limit": limit,
-                             "p_min_id": min_id, "p_max_id": max_id})
+                            self._rango({"p_action": action,
+                                         "p_require_season_null":
+                                             require_season_null,
+                                         "p_dry_run": dry_run,
+                                         "p_limit": limit},
+                                        min_id, max_id))
 
     def purge_dead(self, min_seeders: int, older_days: int,
                    dry_run: bool, limit: int,
                    min_id: int | None = None,
                    max_id: int | None = None) -> dict:
         return self.rpc_row("purge_dead_torrents",
-                            {"p_min_seeders": min_seeders,
-                             "p_older_days": older_days,
-                             "p_dry_run": dry_run, "p_limit": limit,
-                             "p_min_id": min_id, "p_max_id": max_id})
+                            self._rango({"p_min_seeders": min_seeders,
+                                         "p_older_days": older_days,
+                                         "p_dry_run": dry_run,
+                                         "p_limit": limit},
+                                        min_id, max_id))
 
     def keep_best(self, limit: int, min_seeders: int, only_types: str,
                   dry_run: bool, max_deletes: int) -> dict:
