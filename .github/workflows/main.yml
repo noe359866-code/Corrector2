@@ -1,0 +1,447 @@
+name: Editor de torrents (IDs TMDB/AniList/Kitsu/MAL + limpieza + español)
+
+# ===========================================================================
+#  main.yml  ·  Editor de torrents en GitHub Actions
+#
+#  QUÉ HACE (en este orden, un trabajo detrás de otro)
+#    1) pruebas ....... pytest + self-test + levanta un Postgres 16 en el runner,
+#                       aplica sql/*.sql DOS veces (idempotencia), smoke test SQL
+#                       y comprueba que la clave pública (anon) NO puede borrar.
+#                       No toca tu base: usa una base de mentira del runner.
+#    2) migraciones ... aplica sql/000..007 en TU Supabase (secret SUPABASE_DB_URL).
+#                       Si ese secret no existe, se salta con un aviso.
+#    3) editor ........ doctor -> limpieza (xxx/onlyfans) -> IDs (TMDB/IMDb/
+#                       AniList/Kitsu/MAL) -> reintentos -> español/deduplicado ->
+#                       reordenar la columna id. Deja el reporte en el resumen del
+#                       run y en los artefactos.
+#
+#  ORDEN PARA DEJARLO ANDANDO
+#    1) Sube el repo a GitHub (rama main). El botón "Run workflow" solo aparece
+#       cuando este archivo YA está en la rama por defecto.
+#    2) Crea los secrets  (Settings > Secrets and variables > Actions > Secrets):
+#         SUPABASE_URL            (obligatorio)  https://xxxx.supabase.co
+#         SUPABASE_SERVICE_KEY    (obligatorio)  la clave service_role
+#         SUPABASE_DB_URL         (recomendado)  connection string de Postgres
+#         TMDB_API_KEY            (para tmdb_id)
+#         OMDB_API_KEY            (opcional)
+#    3) (Opcional) Environment: crea uno llamado  produccion
+#       (Settings > Environments > New environment). Los trabajos "migraciones" y
+#       "editor" lo usan (línea `environment: produccion`). Puedes poner los mismos
+#       secrets DENTRO del environment en vez de en el repo; si no creas el
+#       environment, GitHub lo crea solo la primera vez (sin reglas).
+#       Consejo: añádele "Required reviewers" y así cada corrida que BORRA te pide
+#       aprobación antes de tocar la base.
+#    4) Pestaña Actions > "Editor de torrents" > Run workflow:
+#         modo = doctor,  dry_run = true     -> comprueba que todo está verde
+#                                               (incluido 🛡️ seguridad)
+#         modo = all,     dry_run = true,  max_deletes = 50   -> ensayo
+#         modo = all,     dry_run = false, max_deletes = 500  -> de verdad
+#    5) El `schedule` (cada 6 h) queda activo solo. Si NO lo quieres todavía,
+#       borra o comenta el bloque `schedule:` de abajo.
+#
+#  SEGURIDAD
+#    sql/007_permisos.sql cierra las funciones del pipeline para que la clave
+#    PÚBLICA (anon) no pueda borrar nada por la API REST. El trabajo "pruebas"
+#    lo comprueba en cada push.
+#
+#  VARIABLES OPCIONALES (Settings > Secrets and variables > Actions > Variables)
+#    TITLE_COLUMN = auto | title | title_text   (default: auto)
+#    MAX_DELETES_PER_RUN se controla con el input "max_deletes" (0 = sin tope)
+# ===========================================================================
+on:
+  schedule:
+    - cron: "17 */6 * * *" # cada 6 horas (UTC) = 4 veces al día
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "Qué ejecutar"
+        type: choice
+        default: all
+        options: [all, purge, enrich, retry, best, renumber, stats, doctor, selftest]
+      dry_run:
+        description: "Dry-run (no borra ni escribe nada)"
+        type: boolean
+        default: false
+      batch_size:
+        description: "Filas por ronda de enriquecimiento"
+        type: string
+        default: "400"
+      rounds:
+        description: "Rondas de enriquecimiento"
+        type: string
+        default: "25"
+      retry_rounds:
+        description: "Rondas del reintento de IDs (los que quedaron NULL)"
+        type: string
+        default: "10"
+      retry_max_attempts:
+        description: "Intentos máximos por fila antes de darla por perdida"
+        type: string
+        default: "4"
+      keep_best_es_limit:
+        description: "TOPE de torrents por película/episodio"
+        type: string
+        default: "3"
+      min_spanish:
+        description: "Cuántos con español garantizar por película/episodio"
+        type: string
+        default: "2"
+      allow_subs_fallback:
+        description: "Si no hay audio en español, aceptar SUBTITULADO en español"
+        type: boolean
+        default: true
+      keep_best_es_strict:
+        description: "Estricto: borrar el grupo si no llega a N con audio/subs reales"
+        type: boolean
+        default: false
+      title_column:
+        description: "Columna con el nombre del release"
+        type: choice
+        default: auto
+        options: [auto, title, title_text]
+      purge_soft_adult:
+        description: "Purga agresiva extra (nude, erotic, playboy, webcam...)"
+        type: boolean
+        default: false
+      purge_empty:
+        description: "Borrar también filas SIN nombre (title y title_text vacíos). Ojo: irreversible"
+        type: boolean
+        default: false
+      max_deletes:
+        description: "TOPE TOTAL de filas a borrar en esta corrida (0 = sin tope)"
+        type: string
+        default: "0"
+      renumber_ids:
+        description: "Reordenar la columna id a 1..N al terminar (rellena huecos)"
+        type: boolean
+        default: true
+
+concurrency:
+  group: torrents-editor
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  LOG_LEVEL: INFO
+
+  # --- credenciales ---
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+  SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+  TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+  OMDB_API_KEY: ${{ secrets.OMDB_API_KEY }}
+
+  # --- columna del nombre del release ---
+  TITLE_COLUMN: ${{ github.event.inputs.title_column || vars.TITLE_COLUMN || 'auto' }}
+
+  # --- modo / ritmo ---
+  DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+  BATCH_SIZE: ${{ github.event.inputs.batch_size || '400' }}
+  ENRICH_ROUNDS: ${{ github.event.inputs.rounds || '25' }}
+  WORKERS: "8"
+  RECHECK_DAYS: "45"
+  FILL_ALL_IDS: "true"
+
+  # --- SELECTOR: cuántas filas edita/borra esta corrida (0 = sin tope) ---
+  MAX_DELETES_PER_RUN: ${{ github.event.inputs.max_deletes || '0' }}
+
+  # --- limpieza ---
+  PURGE_JUNK: "true"
+  PURGE_BLOCKED: "true"
+  PURGE_ABSOLUTE_ONLY: "true"
+  ABSOLUTE_ONLY_ACTION: "delete"
+  ABSOLUTE_REQUIRE_SEASON_NULL: "true"
+  PURGE_SOFT_ADULT: ${{ github.event.inputs.purge_soft_adult || 'false' }}
+  # una fila sin nombre (title y title_text vacíos) NO se borra salvo que lo pidas
+  PURGE_EMPTY_TITLE: ${{ github.event.inputs.purge_empty || 'false' }}
+  PURGE_DEAD: "false"
+
+  # --- reintento de IDs que quedaron NULL ---
+  RETRY_MISSING: "true"
+  RETRY_ROUNDS: ${{ github.event.inputs.retry_rounds || '10' }}
+  RETRY_MAX_ATTEMPTS: ${{ github.event.inputs.retry_max_attempts || '4' }}
+  RETRY_MIN_AGE_MINUTES: "60"
+  AGGRESSIVE_FALLBACK: "true"
+
+  # --- regla de español: dedupe + tope 3 + cascada audio -> subtitulado ---
+  KEEP_BEST: "false" # la regla de español ya hace el top-N
+  KEEP_BEST_LIMIT: ${{ github.event.inputs.keep_best_es_limit || '3' }}
+  KEEP_BEST_ES: "true"
+  KEEP_BEST_ES_LIMIT: ${{ github.event.inputs.keep_best_es_limit || '3' }}
+  KEEP_BEST_ES_MIN_SPANISH: ${{ github.event.inputs.min_spanish || '2' }}
+  KEEP_BEST_ES_ALLOW_SUBS_FALLBACK: ${{ github.event.inputs.allow_subs_fallback || 'true' }}
+  KEEP_BEST_ES_DEDUPE: "true"
+  KEEP_BEST_ES_USE_TITLE_HINT: "true"
+  KEEP_BEST_ES_STRICT: ${{ github.event.inputs.keep_best_es_strict || 'false' }}
+
+  # --- reordenador de la columna id (1..N, sin huecos) ---
+  RENUMBER_IDS: ${{ github.event.inputs.renumber_ids || 'true' }}
+  RENUMBER_IDS_FORCE: "false"
+  RENUMBER_MAX_ROWS: "200000"
+
+jobs:
+  # =========================================================================
+  # 1) PRUEBAS: unitarias + self-test + SQL real (Postgres 16 del runner)
+  # =========================================================================
+  pruebas:
+    name: Pruebas (unitarias + SQL real)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: torrents_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DB_URL: postgresql://postgres:postgres@localhost:5432/torrents_test
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Pruebas unitarias (parser, blacklist, matching, pipeline, fallback)
+        run: python -m pytest tests -q
+
+      - name: Self-test del CLI (sin red ni base)
+        run: python -m src.main selftest
+
+      - name: Verificar que el workflow y los scripts son válidos
+        run: |
+          python - <<'PY'
+          import yaml, pathlib
+          cargado = yaml.safe_load(pathlib.Path(".github/workflows/main.yml").read_text())
+          assert "jobs" in cargado and len(cargado["jobs"]) >= 3, "workflow incompleto"
+          entradas = cargado[True]["workflow_dispatch"]["inputs"]
+          for obligatorio in ("modo", "dry_run", "max_deletes", "renumber_ids",
+                              "allow_subs_fallback", "purge_empty"):
+              assert obligatorio in entradas, f"falta el input {obligatorio}"
+          assert "renumber" in entradas["modo"]["options"], "falta el modo renumber"
+          print("workflow OK:", list(cargado["jobs"]))
+          PY
+          bash -n scripts/apply_sql.sh && bash -n scripts/test_all.sh
+          echo "scripts OK"
+
+      - name: Crear los roles de Supabase (anon / authenticated / service_role)
+        run: |
+          # Se crean ANTES de aplicar el SQL para que sql/007_permisos.sql tenga
+          # a quién revocar: así la comprobación de seguridad del final es real.
+          psql "$TEST_DB_URL" -v ON_ERROR_STOP=1 -c "
+            do \$\$ begin
+              if not exists (select 1 from pg_roles where rolname = 'anon') then create role anon nologin; end if;
+              if not exists (select 1 from pg_roles where rolname = 'authenticated') then create role authenticated nologin; end if;
+              if not exists (select 1 from pg_roles where rolname = 'service_role') then create role service_role nologin; end if;
+            end \$\$;"
+
+      - name: Aplicar migraciones en Postgres 16 (usa scripts/apply_sql.sh)
+        run: SUPABASE_DB_URL="$TEST_DB_URL" bash scripts/apply_sql.sh
+
+      - name: Aplicar migraciones otra vez (idempotencia)
+        run: SUPABASE_DB_URL="$TEST_DB_URL" bash scripts/apply_sql.sh
+
+      - name: Smoke test del SQL (borrados, keep_best, español, reintentos, seguridad)
+        run: python tests/sql_smoke.py
+
+      - name: Comprobar que la clave pública (anon) NO puede borrar
+        run: |
+          # La tabla de pruebas no tiene la columna title_text del esquema real
+          # (el fixture la añade). Aquí solo miramos los permisos.
+          python - <<'PY'
+          import os, psycopg
+          dsn = os.environ["TEST_DB_URL"]
+          with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+              cur.execute("do $$ begin "
+                          "if not exists (select 1 from pg_roles where rolname='anon') then create role anon nologin; end if; "
+                          "if not exists (select 1 from pg_roles where rolname='authenticated') then create role authenticated nologin; end if; "
+                          "if not exists (select 1 from pg_roles where rolname='service_role') then create role service_role nologin; end if; "
+                          "end $$;")
+              cur.execute("select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace "
+                          "where n.nspname='public' and p.proname in "
+                          "('purge_junk_torrents','purge_blocked_torrents','purge_absolute_only_torrents',"
+                          "'purge_dead_torrents','keep_best_torrents','keep_best_torrents_es',"
+                          "'renumber_torrent_ids','apply_torrent_ids') "
+                          "and (has_function_privilege('anon', p.oid, 'execute') "
+                          "     or has_function_privilege('authenticated', p.oid, 'execute'))")
+              abiertas = cur.fetchone()[0]
+              assert abiertas == 0, (f"{abiertas} funciones destructivas son ejecutables por anon/authenticated: "
+                                     "sql/007_permisos.sql no se aplicó")
+              print("seguridad OK: 0 funciones destructivas ejecutables por anon/authenticated")
+          PY
+
+      - name: Proveedores públicos en vivo (informativo, no bloquea)
+        continue-on-error: true
+        run: python tests/live_providers.py
+
+  # =========================================================================
+  # 2) MIGRACIONES en Supabase (solo si existe el secret SUPABASE_DB_URL)
+  # =========================================================================
+  migraciones:
+    name: Aplicar SQL en Supabase
+    # Si prefieres NO usar environment, borra esta línea y pon los secrets a
+    # nivel de repo (Settings > Secrets and variables > Actions > Secrets).
+    environment: produccion
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Comprobar el secret SUPABASE_DB_URL
+        id: check
+        run: |
+          if [ -z "${SUPABASE_DB_URL}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::No hay secret SUPABASE_DB_URL: se omite la migración automática. Aplica sql/*.sql a mano en el SQL Editor de Supabase."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Instalar cliente de Postgres
+        if: steps.check.outputs.skip == 'false'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      - name: Aplicar sql/*.sql (helpers, enrich, purge, retry/español)
+        if: steps.check.outputs.skip == 'false'
+        run: bash scripts/apply_sql.sh
+
+  # =========================================================================
+  # 3) EDITOR: pipeline completo + reporte
+  # =========================================================================
+  editor:
+    name: Pipeline (limpieza + IDs + español + mejores)
+    # Si prefieres NO usar environment, borra esta línea y pon los secrets a
+    # nivel de repo (Settings > Secrets and variables > Actions > Secrets).
+    environment: produccion
+    needs: [pruebas, migraciones]
+    if: always() && needs.pruebas.result == 'success' && needs.migraciones.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Aviso de configuración
+        run: |
+          {
+            echo "### ⚙️ Configuración de esta ejecución"
+            echo ""
+            echo "| Ajuste | Valor |"
+            echo "| --- | --- |"
+            echo "| modo | \`${{ github.event.inputs.modo || 'all' }}\` |"
+            echo "| dry_run | \`$DRY_RUN\` |"
+            echo "| columna del título | \`$TITLE_COLUMN\` |"
+            echo "| tope por episodio | \`$KEEP_BEST_ES_LIMIT\` |"
+            echo "| mínimo en español | \`$KEEP_BEST_ES_MIN_SPANISH\` |"
+            echo "| aceptar subtitulado | \`$KEEP_BEST_ES_ALLOW_SUBS_FALLBACK\` |"
+            echo "| modo estricto | \`$KEEP_BEST_ES_STRICT\` |"
+            echo "| TOPE TOTAL de borrado por corrida | \`$MAX_DELETES_PER_RUN\` (0 = sin tope) |"
+            echo "| borrar filas sin nombre | \`$PURGE_EMPTY_TITLE\` |"
+            echo "| reordenar ids | \`$RENUMBER_IDS\` |"
+            echo "| supabase | $([ -n \"$SUPABASE_URL\" ] && echo '✅ configurado' || echo '❌ falta') |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validar configuración (doctor)
+        run: python -m src.main doctor
+        continue-on-error: true
+
+      - name: "1/6 · Limpieza (xxx/adultos, absolute_episode, basura)"
+        if: ${{ github.event.inputs.modo == '' || github.event.inputs.modo == 'all' || github.event.inputs.modo == 'purge' }}
+        env:
+          SUMMARY_FILE: reportes/1-limpieza.md
+          SUMMARY_JSON: reportes/1-limpieza.json
+          REPORT_TO_STEP_SUMMARY: "false"
+        run: python -m src.main purge
+
+      - name: "2/6 · Resolver IDs (TMDB/IMDb/AniList/Kitsu/MAL)"
+        if: ${{ github.event.inputs.modo == '' || github.event.inputs.modo == 'all' || github.event.inputs.modo == 'enrich' }}
+        env:
+          SUMMARY_FILE: reportes/2-ids.md
+          SUMMARY_JSON: reportes/2-ids.json
+          REPORT_TO_STEP_SUMMARY: "false"
+        run: python -m src.main enrich
+
+      - name: "3/6 · Reintentar los IDs que quedaron NULL"
+        if: ${{ github.event.inputs.modo == '' || github.event.inputs.modo == 'all' || github.event.inputs.modo == 'retry' }}
+        env:
+          SUMMARY_FILE: reportes/3-reintentos.md
+          SUMMARY_JSON: reportes/3-reintentos.json
+          REPORT_TO_STEP_SUMMARY: "false"
+        run: python -m src.main retry
+        continue-on-error: true
+
+      - name: "4/6 · Español + deduplicado (3 máx · 2 con español · audio→subtítulos)"
+        if: ${{ github.event.inputs.modo == '' || github.event.inputs.modo == 'all' || github.event.inputs.modo == 'best' }}
+        env:
+          SUMMARY_FILE: reportes/4-espanol.md
+          SUMMARY_JSON: reportes/4-espanol.json
+          REPORT_TO_STEP_SUMMARY: "false"
+        run: python -m src.main best
+
+      - name: "5/6 · Reordenar la columna id (1..N, sin huecos)"
+        if: ${{ (github.event.inputs.modo == '' || github.event.inputs.modo == 'all' || github.event.inputs.modo == 'renumber') && env.RENUMBER_IDS == 'true' }}
+        env:
+          SUMMARY_FILE: reportes/5-reordenar.md
+          SUMMARY_JSON: reportes/5-reordenar.json
+          REPORT_TO_STEP_SUMMARY: "false"
+        run: python -m src.main renumber
+
+      - name: "6/6 · Otros modos (stats / doctor / selftest)"
+        if: ${{ github.event.inputs.modo == 'stats' || github.event.inputs.modo == 'doctor' || github.event.inputs.modo == 'selftest' }}
+        run: python -m src.main "${{ github.event.inputs.modo }}"
+
+      - name: Estado final de la tabla
+        if: always()
+        continue-on-error: true
+        run: python -m src.main stats
+
+      - name: Unir reportes y publicar en el Step Summary
+        if: always()
+        run: |
+          mkdir -p reportes
+          : > summary.md
+          for f in reportes/*.md; do
+            [ -f "$f" ] || continue
+            { echo "<!-- $f -->"; cat "$f"; echo; echo "---"; echo; } >> summary.md
+          done
+          if [ ! -s summary.md ]; then echo "_Sin reportes en esta ejecución._" > summary.md; fi
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+          echo "reporte final: $(wc -l < summary.md) líneas"
+
+      - name: Publicar artefactos (reportes + log + caché)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporte-torrents-${{ github.run_number }}
+          path: |
+            summary.md
+            reportes/*.md
+            reportes/*.json
+            run.log
+            cache.sqlite
+          if-no-files-found: warn
+          retention-days: 14
