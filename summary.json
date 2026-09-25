@@ -1,0 +1,204 @@
+{
+  "inicio": "2026-09-25T02:52:14+0000",
+  "dry_run": false,
+  "comando": "all",
+  "avisos": [],
+  "purgas": {
+    "junk": {
+      "matched": 0,
+      "deleted": 0,
+      "sample": [],
+      "skipped": 0
+    },
+    "blocked": {
+      "matched": 1,
+      "deleted": 1,
+      "sample": [
+        "OnlyFans Exclusive Pack XXX 1080p"
+      ],
+      "skipped": 0
+    },
+    "absolute_only": {
+      "matched": 1,
+      "deleted": 1,
+      "sample": [
+        "Serie Rara 1080p WEB x264 Latino"
+      ],
+      "skipped": 0
+    },
+    "keep_best": {
+      "matched": 0,
+      "deleted": 0,
+      "sample": [],
+      "skipped": 0,
+      "skipped_limit": 0
+    },
+    "keep_best_es": {
+      "matched": 0,
+      "deleted": 0,
+      "kept": 6,
+      "deleted_dupes": 1,
+      "groups_total": 4,
+      "groups_ok_audio": 0,
+      "groups_ok_spanish": 1,
+      "groups_low_spanish": 3,
+      "kept_with_subs": 4,
+      "skipped": 0,
+      "skipped_limit": 0,
+      "sample": [],
+      "sample_low_spanish": [
+        "The Matrix 1999 720p WEB-DL x264 Inglés",
+        "Jujutsu Kaisen S02E05 1080p CR WEB-DL x264 Subs ES",
+        "Frieren Beyond Journeys End S01E01 1080p WEB-DL x264 Sub Español",
+        "The Matrix 1999 1080p BluRay x264 AC3 Latino"
+      ]
+    }
+  },
+  "stats_antes": {
+    "total": 9,
+    "sin_id": 9,
+    "por_tipo": {
+      "anime": 4,
+      "movie": 3,
+      "series": 2
+    },
+    "por_calidad": {
+      "480p": 1,
+      "720p": 1,
+      "1080p": 7
+    },
+    "sin_seeders": 0,
+    "absolute_only": 1,
+    "sin_temporada": 4
+  },
+  "stats_despues": {
+    "total": 6,
+    "sin_id": 0,
+    "por_tipo": {
+      "anime": 4,
+      "movie": 2
+    },
+    "por_calidad": {
+      "480p": 1,
+      "720p": 1,
+      "1080p": 4
+    },
+    "sin_seeders": 0,
+    "absolute_only": 0,
+    "sin_temporada": 2
+  },
+  "enrich": {
+    "filas_procesadas": 7,
+    "resueltas": 4,
+    "parciales": 3,
+    "sin_match": 0,
+    "errores": 0,
+    "cache_hits": 0,
+    "fallbacks": 3,
+    "fallback_hits": 3,
+    "ids_descartados": 0,
+    "por_proveedor": {
+      "fallback": 3,
+      "imdb:suggest": 7,
+      "anilist": 4,
+      "kitsu": 4
+    },
+    "ejemplos": [
+      "(parcial) The Matrix -> imdb:suggest",
+      "(parcial) The Matrix -> imdb:suggest",
+      "(parcial) The Matrix -> imdb:suggest",
+      "Kimetsu no Yaiba -> anilist+kitsu+imdb:suggest (0.97)",
+      "Jujutsu Kaisen -> anilist+kitsu+imdb:suggest (0.97)",
+      "Kimetsu no Yaiba -> anilist+kitsu+imdb:suggest (0.97)",
+      "Frieren Beyond Journeys End -> anilist+kitsu+imdb:suggest (0.97)"
+    ],
+    "cache_local": {
+      "titulos_cache": 4,
+      "sin_match_cache": 0,
+      "ids_externos": 0
+    }
+  },
+  "proveedores": {
+    "anilist": {
+      "calls": 5,
+      "hits": 4,
+      "misses": 0,
+      "errors": 0,
+      "cache_hits": 0
+    },
+    "kitsu": {
+      "calls": 0,
+      "hits": 0,
+      "misses": 0,
+      "errors": 0,
+      "cache_hits": 0
+    },
+    "jikan": {
+      "calls": 0,
+      "hits": 0,
+      "misses": 0,
+      "errors": 0,
+      "cache_hits": 0
+    },
+    "imdb": {
+      "calls": 7,
+      "hits": 7,
+      "misses": 0,
+      "errors": 0,
+      "cache_hits": 0
+    },
+    "tvmaze": {
+      "calls": 0,
+      "hits": 0,
+      "misses": 0,
+      "errors": 0,
+      "cache_hits": 0
+    }
+  },
+  "seguridad": [
+    {
+      "nivel": "MEDIO",
+      "hallazgo": "RLS está desactivado en public.torrents (actívalo y deja solo SELECT público)"
+    }
+  ],
+  "renumber": {
+    "informe_antes": {
+      "fks": 0,
+      "listo": false,
+      "total": 6,
+      "huecos": 3,
+      "max_id": 9,
+      "min_id": 1,
+      "siguiente_id": 9
+    },
+    "renumber": {
+      "fks": 0,
+      "nota": "renumerado de 1..9 a 1..6",
+      "listo": true,
+      "total": 6,
+      "huecos": 3,
+      "max_id": 9,
+      "min_id": 1,
+      "updated": 6,
+      "max_nuevo": 6,
+      "min_nuevo": 1,
+      "secuencia": "public.torrents_id_seq",
+      "updated_at_conservado": true
+    },
+    "informe_despues": {
+      "fks": 0,
+      "listo": true,
+      "total": 6,
+      "huecos": 0,
+      "max_id": 6,
+      "min_id": 1,
+      "siguiente_id": 6
+    }
+  },
+  "duracion_seg": 13.5,
+  "presupuesto": {
+    "tope": 500,
+    "usado": 3,
+    "restante": 497
+  }
+}

@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- datos LOCALES del pipeline (las carpetas y sus .gitkeep SÍ se suben,
+#     para que al clonar en GitHub Actions no falte ninguna carpeta) ---
+cache.sqlite
+summary.md
+summary.json
+run.log
+reportes/**
+!reportes/**/
+cache/**
+!cache/**/
+logs/**
+!logs/**/
+tmp/**
+!tmp/**/
+datos/**
+!datos/**/
+!**/.gitkeep
+
+# entorno (secretos)
+.env
+.env.local
+config.env

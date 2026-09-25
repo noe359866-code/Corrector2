@@ -1,0 +1,285 @@
+============================================================================
+ VERIFICACIÓN · torrents-enricher v1.6  (2026-09-25)
+ Nuevo: SEGURIDAD (la clave pública anon ya NO puede borrar: sql/007) + título
+        efectivo (title -> title_text) + nada se borra sin permiso explícito +
+        .gitkeep en todas las carpetas para que GitHub conserve la estructura
+============================================================================
+
+1) MIGRACIONES SQL (Postgres 17, base UTF8 como Supabase)
+   $ SUPABASE_DB_URL=... bash scripts/apply_sql.sh     (aplica sql/000..007)
+   -> aplicadas DOS veces seguidas sin un solo error  ✔ idempotencia
+   -> verifica 24/24 funciones RPC y las columnas ids_* (ids_checked_at,
+      ids_source, ids_confidence, ids_attempts)
+   -> sql/006 (guardián de firmas) deja UNA sola versión de cada función
+   -> sql/007 (permisos) cierra las funciones a PUBLIC/anon/authenticated
+
+2) PRUEBAS UNITARIAS (sin red, sin base)
+   $ python -m pytest tests -q
+   -> 65 passed
+   Incluye: parser, blacklist/allowlist, matching, pipeline, fallback
+   (title_alt + variantes), modo reintento, tope compartido, ids saneados,
+   pruebas anti-deriva (apply_torrent_ids igual en 002/004, cobertura de 006/007),
+   que el SQL se pueda aplicar entero dentro de una transacción (rollback: no
+   toca nada) y que el reporte muestre los hallazgos de seguridad 🚨.
+   Las 2 pruebas del nombre de release:
+     · release_signals() / looks_like_release_name elige el nombre de release
+       ('Frieren Beyond Journeys End S01E01 1080p WEB-DL x264' -> sí;
+        'Nombre interno 12345' -> no)
+     · una fila con title='Nombre interno 12345' y title_text = release real
+       resuelve anilist 154587 + mal 52991 + imdb tt22248376
+
+3) SELF-TEST DEL CLI
+   $ python -m src.main selftest
+   -> ✔ SELFTEST OK
+
+4) SQL REAL CONTRA POSTGRES
+   $ TEST_DB_URL=... python tests/sql_smoke.py
+   -> == 122 OK, 0 fallos ==
+   Secciones [12] y [13] nuevas:
+     [12] PERMISOS: ninguna función del pipeline es ejecutable por PUBLIC; como
+          rol 'anon' el borrado y el renumerado dan 'permission denied'; la
+          auditoría torrents_security_audit() responde y no da riesgo ALTO.
+     [13] TÍTULO VACÍO: con `title`='' y el release en title_text, keep_best_es
+          NO borra nada (antes agrupaba las 8 filas como una sola obra y borraba
+          5); una fila sin nombre se conserva salvo PURGE_EMPTY_TITLE=true.
+   Secciones [10] y [11] (auditoría anterior): acentos en MAYÚSCULA en
+   norm_torrent_text/torrent_title_key/is_spanish_text, un lote de apply_torrent_ids
+   con basura mezclada (imdb inválido, tmdb '603.5', mal con espacios) que se
+   escribe entero sin romperse, cache_key repetida, invariante del tope en la regla
+   de español y 'ninguna función del pipeline sobrecargada'.
+   Sección [7] reescrita para la cascada (fixture de 14 filas = 3 grupos + 1 pack):
+     · 1 grupo llega a 2 en AUDIO español (Matrix: Latino + Castellano)
+     · 1 grupo llega a 2 contando audio+subtítulos
+     · 2 grupos quedan flojos (BB con 1 audio, anime con 1 subtitulado)
+     · 1 torrente conservado POR SUBTITULADO (el 1080p [SUBS ES] desplaza al 480p)
+     · cascada APAGADA (p_allow_subs_fallback=false) -> kept_with_subs = 0
+     · modo estricto borra el grupo solo-subtitulado; dry-run no borra nada
+     · 3 borrados de tope, 1 duplicado, 1 pack omitido (sin season/episode)
+   is_spanish_text() comprobado:
+     'Subtítulos: ES' · 'Subtitulado Español' · 'SUBS [ES]' · 'Latino' · 'Spanish'
+        -> true
+     'English' · 'Japanese' · 'Estonian' · 'genital' -> false (sin falsos positivos)
+
+5) PROVEEDORES EN VIVO
+   AniList / Kitsu / Jikan:  ✔ 4/4 anime, confianza 1.00
+     Jujutsu Kaisen -> anilist 113415 · kitsu 42765 · mal 40748
+     One Piece      -> anilist 21     · kitsu 12    · mal 21
+     Attack on Titan-> anilist 16498  · kitsu 7442  · mal 16498
+     Frieren        -> anilist 154587 · kitsu 46474 · mal 52991
+     (Jikan devuelve 504 —fallo suyo—; el mal_id sale de AniList/Kitsu)
+   IMDb suggestions (SIN API KEY): ✔ 4/4, confianza 1.00
+     The.Matrix.1999   -> tt0133093
+     Breaking.Bad.S05E14 -> tt0903747
+     Dune.Part.Two.2024  -> tt15239678
+     Frieren.S01E12      -> tt22248376
+   TVmaze (SIN API KEY): ✔ 2/2 + entrega thetvdb
+     Breaking Bad -> tt0903747 (thetvdb 81189)
+     Frieren      -> thetvdb 424536
+
+6) PIPELINE COMPLETO LOCAL (PostgREST simulado + Postgres + APIs reales)
+   $ psql "$DB" -f tests/fixture_e2e.sql       # 9 filas realistas
+   $ bash scripts/simulate_workflow.sh --local # LOS MISMOS PASOS DEL ACTION
+   -> limpieza:   1 adulto (OnlyFans) + 1 fila con solo absolute_episode = 2 borradas
+   -> IDs:        7/7 filas resueltas
+                  · The Matrix       -> imdb tt0133093           (imdb:suggest)
+                  · Kimetsu/Jujutsu  -> anilist + kitsu (+imdb)   (confianza 1.00)
+                  · Frieren (nombre real en title_text) ->
+                    imdb tt22248376 · anilist 154587 · kitsu 46474 · mal 52991
+   -> reintentos: 0 filas pendientes (nada se quedó sin ID)
+   -> español:    1 duplicado borrado -> 6 conservados
+                  grupos con 2+ en AUDIO: 0 · con audio+subs: 1 · flojos: 3
+                  CONSERVADOS POR SUBTITULADO: 4  ← la cascada funcionando
+   -> reportes:   reportes/1-limpieza.md … 4-espanol.md + summary.md (unido)
+   Segunda corrida con el caché persistente (title_id_cache):
+     "caché persistente: 1 títulos reutilizados" -> ids_source CONSERVA su
+     procedencia original ('imdb:suggest') y confidence 0.95, SIN llamadas API.
+
+7) WORKFLOW DE GITHUB ACTIONS (.github/workflows/torrents-editor.yml)
+   Estructura revisada y validada (yaml.safe_load + bash -n):
+     job "Pruebas"      pytest 42 + selftest + valida YAML/scripts +
+                        Postgres 16 del runner: aplica sql/*.sql 2 veces +
+                        sql_smoke 62 + live_providers (continue-on-error)
+     job "Migraciones"  apply_sql.sh si existe SUPABASE_DB_URL (si no, avisa)
+     job "Pipeline"     doctor -> limpieza -> IDs -> reintentos -> español ->
+                        estado final (always) -> une reportes en summary.md
+                        (Step Summary + artefacto de 14 días)
+   Inputs manuales: modo, dry_run, title_column, keep_best_es_limit, min_spanish,
+                    allow_subs_fallback (CASCADA, por defecto true),
+                    keep_best_es_strict, purge_soft_adult, batch_size, rounds,
+                    retry_rounds, retry_max_attempts
+   Variables del job editor: KEEP_BEST=false, KEEP_BEST_ES=true (límite 3,
+   mínimo 2, dedupe, title hint), KEEP_BEST_ES_ALLOW_SUBS_FALLBACK=★ (input),
+   RETRY_MISSING=true (4 intentos, 10 rondas), AGGRESSIVE_FALLBACK=true,
+   PURGE_SOFT_ADULT=false, PURGE_DEAD=false.
+   Cada paso escribe su propio reporte (SUMMARY_FILE=reportes/N-paso.md) para
+   no pisarse; el paso final los une.
+
+8) REGLA DE ESPAÑOL (cascada obligatoria, sql/004 v2)
+   keep_best_torrents_es(p_limit=3, p_min_spanish=2, p_min_seeders=0,
+     p_only_types, p_dedupe, p_strict_spanish, p_use_title_hint,
+     p_allow_subs_fallback, p_spanish_tokens, p_dry_run)
+   Peldaños: 3 = audio ES · 2 = subtítulos ES · 1 = el título lo dice · 0 = nada.
+   Una sola numeración (keep_es -> keep_hint -> r_final <= límite) evita que la
+   cuota "resto" borre filas ya conservadas; los packs sin season/episode nunca
+   se tocan. Devuelve groups_ok_audio / groups_ok_spanish / groups_low_spanish /
+   kept_with_subs / skipped / sample.
+   Reporte: tabla 🇪🇸 con las tres cifras + nota de cascada + huecos
+   (report_spanish_gaps: con_audio / con_subs) + stats (🎧 audio, 💬 subtítulos,
+   solo subtitulado).
+
+9) SELECTOR DE FILAS POR CORRIDA  (sql/005 · p_limit / p_max_deletes)
+   Todas las purgas aceptan p_limit y devuelven skipped (no borradas por el tope):
+     select * from purge_blocked_torrents(p_tokens => '{onlyfans,xxx}', p_limit => 1);
+       -> matched 2 · deleted 1 · skipped 1 · sample {las 2, para que veas qué falta}
+   keep_best_torrents(p_max_deletes) y keep_best_torrents_es(p_max_deletes) igual;
+   en la regla de español los DUPLICADOS gastan primero el tope (v_resto).
+   Verificado E2E con el fixture de 9 filas:
+     MAX_DELETES_PER_RUN=1 -> 1 borrada EN TOTAL (9 -> 7 filas), el resto intacto
+     MAX_DELETES_PER_RUN=2 -> tras 2 borrados las etapas siguientes salen ⏭️ omitidas
+     MAX_DELETES_PER_RUN=0/ausente -> comportamiento anterior (borra todo)
+   El reporte añade la columna «Fuera por tope» y el log dice cuántas quedan.
+
+10) REORDENADOR DE LA COLUMNA id  (sql/005 · renumber_torrent_ids + torrents_id_report)
+   Fixture con ids 1,4,5,6,8,9 (se borraron 2,3,7):
+     torrents_id_report()      -> total 6 · huecos 3 · listo false
+     renumber_torrent_ids(dry) -> "se pasaría de 1..9 a 1..6 (3 huecos)"  (no toca nada)
+     renumber_torrent_ids()    -> "renumerado de 1..9 a 1..6" · updated 6
+     después                   -> 1,2,3,4,5,6 · huecos 0 · listo true
+   Comprobado además:
+     · conserva el ORDEN original de las filas
+     · conserva updated_at (no marca las 100 filas como "recién actualizadas")
+     · sincroniza la secuencia: el INSERT siguiente recibió id 7 (no chocó)
+     · segunda pasada = no-op: "ya estaba en orden (1..N)"
+     · con una FK hacia torrents(id) se SALTA por seguridad (saltado=true)
+     · p_max_rows frena una reescritura masiva por accidente
+     · dos fases (id + desfase) porque la PRIMARY KEY no es diferible
+   CLI:  python -m src.main renumber [--dry-run]   (RENUMBER_IDS=true en el workflow,
+         paso 5/6, después de limpieza/IDs/español)
+
+11) WORKFLOW (actualizado): ahora son 6 pasos —
+    limpieza -> IDs -> reintentos -> español -> REORDENAR IDS -> otros modos,
+    más Estado final y la unión de los reportes. Inputs nuevos: max_deletes y
+    renumber_ids. El job de pruebas valida que existan y que el modo 'renumber'
+    esté en la lista; apply_sql.sh verifica las 22 funciones.
+
+12) NIVELES DE SEGURIDAD (sin cambios)
+   · DRY_RUN no escribe ni borra nada (probado en SQL y en el CLI).
+   · Los IDs nunca se pisan: coalesce(columna, valor_nuevo) en SQL.
+   · IDs/estado solo se escriben en columnas reales de public.torrents.
+   · service_role solo en Secrets/.env (.gitignore).
+
+----------------------------------------------------------------------------
+TODO EN VERDE: 42 pytest · 62 SQL smoke · selftest OK · migraciones idempotentes
+· E2E completo con la cascada · workflow validado para GitHub Actions.
+----------------------------------------------------------------------------
+
+13) AUDITORÍA FINAL (bugs cazados y arreglados antes de lanzar a GitHub Actions)
+   A) norm_torrent_text() con locale=C: lower('Ñ') no baja la Ñ y 'ESPAÑOL' se
+      volvía 'espa ol' -> el audio en español EN MAYÚSCULAS no se detectaba, y las
+      claves de agrupación/blacklist se rompían. Arreglado con tabla translate en
+      minúsculas: 'AUDIO ESPAÑOL 5.1' -> 'audio espanol 5 1' · is_spanish_text = true
+      · 'SEÑOR DE LOS ANILLOS' y 'Señor de los Anillos' dan la MISMA clave.
+   B) keep_best_torrents_es quitaba de _base duplicados que NO había borrado (por el
+      tope): 'kept' mentía y esas filas quedaban invisibles para el resto de la
+      corrida. Ahora solo se quitan los que de verdad se borran.
+   C) apply_torrent_ids: UN id con basura ('INVALIDO-123', '603.5', year '20xx',
+      confidence no numérica, cache_key repetida en el lote) abortaba las ~400 filas
+      del lote entero. Blindado en sql/002 y sql/004 con tabla temporal saneada
+      (regex por campo + group by cache_key). Probado: 3/3 filas escritas con basura
+      mezclada.
+   D) btrim() en los 5 ids: ' tt0133093 ' o ' 52991 ' se descartaban en silencio.
+      Ahora se limpian y se escriben (probado en el smoke).
+   E) Funciones SOBRECARGADAS: reaplicar sql/004 después de sql/005 dejaba dos
+      versiones de keep_best_torrents_es ("function ... is not unique"). Nuevo
+      sql/006_signature_guard.sql (se aplica el último, idempotente) borra las firmas
+      obsoletas y AVISA si alguna función del pipeline queda duplicada.
+   F) sanitizar_ids() en Python: los ids se limpian (strip) y se validan con la misma
+      regex que la SQL antes de enviarlos; los descartados se cuentan y salen en el
+      reporte («IDs descartados por formato inválido»).
+   G) Puerta de salud: si la base no responde, el proceso sale con mensaje claro
+      («❌ no pude conectar con la base...») en vez de un traceback de httpx; una
+      corrida ya no puede "pasar en verde" sin haber hecho nada.
+   H) Tope GLOBAL de borrado: MAX_DELETES_PER_RUN=500 son 500 filas EN TOTAL por
+      corrida (no 500 por etapa); al agotarse, las etapas siguientes salen ⏭️
+      omitidas en el log y en el reporte, y el bloque del tope dice usadas/quedan.
+
+----------------------------------------------------------------------------
+TODO EN VERDE: 55 pytest · 107 SQL smoke · selftest OK · apply ×2 (22/22)
+· migraciones idempotentes · E2E completo (limpieza -> IDs -> español ->
+renumerado 1..9 -> 1..6) · workflow validado para GitHub Actions.
+
+14) SEGURIDAD: LA CLAVE PÚBLICA YA NO PUEDE BORRAR  (sql/007_permisos.sql)
+   Problema (comprobado en una base real): toda función nueva en Postgres
+   recibe EXECUTE para PUBLIC. En Supabase el esquema public está expuesto por
+   la API REST y la clave `anon` es PÚBLICA (viaja en el addon de Stremio).
+   Con esa clave se podía hacer, literalmente:
+     POST /rest/v1/rpc/purge_junk_torrents   {"p_dry_run": false}   -> borra
+     POST /rest/v1/rpc/renumber_torrent_ids  {"p_start": 500}       -> 1..9 -> 500..507
+   Arreglo:
+     · revoke de las 23 funciones a PUBLIC / anon / authenticated
+     · grant solo a service_role (GitHub Secrets) y a postgres
+     · public.torrents_security_audit() para vigilarlo (la usa `doctor`): revisa
+       permisos de las funciones, permisos de la tabla, POLÍTICAS RLS que dejen
+       escribir a la clave pública y si RLS está desactivado
+     · el job de pruebas del workflow crea los roles ANTES de aplicar el SQL y
+       verifica al final que anon/authenticated no pueden ejecutar nada
+   Verificado: como anon -> "permission denied"; como service_role -> funciona.
+
+15) NADA SE BORRA SIN PERMISO EXPLÍCITO + TÍTULO EFECTIVO
+   · Filas SIN ningún nombre (title y title_text vacíos): se CONSERVAN. Solo se
+     borran si pones PURGE_EMPTY_TITLE=true (p_purge_empty en el RPC).
+     Motivo: un borrado no se puede deshacer y esas filas no estorban.
+   · El nombre del release se busca en `title` y, si está vacío, en `title_text`
+     (título efectivo) en las 4 funciones que agrupan/borran por nombre
+     (purge_junk, purge_blocked, keep_best_torrents, keep_best_torrents_es).
+     Antes: con `title` vacío en toda la tabla, todas las filas compartían la
+     clave 'title:', se agrupaban como UNA sola obra y la regla de español
+     borraba todo menos 3 (probado: 8 filas -> 1 grupo).
+   · Las filas sin título ni ningún id NO se agrupan nunca (se cuentan como
+     "skipped").
+   · El reordenador toma `lock table public.torrents in access exclusive mode`
+     (con lock_timeout 15s): un INSERT de la app ya no puede chocar con un id a
+     medio asignar. Si hay una transacción larga, aborta con error claro y sin
+     haber tocado nada.
+
+16) CARPETAS EN GITHUB (.gitkeep)
+   Se añadió .gitkeep a todas las carpetas y subcarpetas (incluidas las nuevas
+   datos/, datos/salida/, cache/, logs/, tmp/, reportes/) para que git las
+   conserve al subir el repo. El .gitignore ignora el CONTENIDO generado pero
+   permite los .gitkeep.
+
+----------------------------------------------------------------------------
+TODO EN VERDE: 65 pytest · 122 SQL smoke · selftest OK · apply x2 (24/24, tras
+crear los roles de Supabase) · E2E (limpieza -> IDs -> español -> renumerado
+1..9 -> 1..6) · permisos verificados (anon bloqueado) · workflow validado.
+
+17) EL BUG MÁS PELIGROSO DE TODOS: UN ID MAL PUESTO BORRABA TORRENTS LEGÍTIMOS
+   (encontrado con un escenario de 1.000 filas + pipeline completo)
+   Cadena del fallo:
+     a) el enriquecedor prueba variantes del título cuando no hay match: "Obra 2" -> "Obra"
+     b) existe una película que se llama literalmente "Obra"  ->  match PERFECTO (1.0) y
+        confianza 0.95  ->  el MISMO imdb_id se escribía en cientos de filas distintas
+     c) la limpieza agrupa por imdb_id -> las ve como "la misma obra" -> conserva el top 3 y
+        borra el resto.  Resultado medido: 402 filas borradas de 1.000 (de 300 obras, 53
+        familias perdieron filas) y la caché "inventaba" 0.95 al reutilizar un acierto, así
+        que el id dudoso parecía bueno.
+   Arreglos (los tres):
+     1) PENALIZACION_VARIANTE = 0.8: un match conseguido con una variante sintética del
+        título vale menos (0.95*0.8 = 0.76). Aplica a IMDb suggestions y a TVmaze.
+     2) La caché (local y persistente) guarda y devuelve la confianza REAL; si no la tiene,
+        devuelve 0.5 ("desconocida") en vez de inventar 0.95.
+     3) Las funciones que borran solo agrupan por id si el id es de fiar:
+        torrent_id_es_confiable(ids_source, ids_confidence) = id que ya venía en la tabla
+        (ids_source null) o escrito por nosotros con confianza >= 0.92. Si no, agrupan por
+        TÍTULO (mucho más conservador). También las salvaguardas de "fila sin título ni id".
+   Antes/después con el MISMO escenario (1.000 filas, top 3):
+     antes -> 402 borradas (598 quedan), familias destrozadas
+     ahora ->  11 borradas (989 quedan), 231 familias intactas con sus 3 filas
+   Regresión en el smoke ([14]): 10 obras distintas con el mismo id a 0.89 -> 0 borrados;
+   el mismo id a 0.99 -> agrupa y deja el top 3; id propio (sin ids_source) -> se respeta.
+
+----------------------------------------------------------------------------
+TODO EN VERDE: 65 pytest · 122 SQL smoke · selftest OK · apply x2 (24/24) ·
+E2E de 9 filas (limpieza -> IDs -> español -> renumerado 1..9 -> 1..6) ·
+E2E de 1.000 filas con tope de 500 · permisos verificados (anon bloqueado) ·
+workflow validado para GitHub Actions.
